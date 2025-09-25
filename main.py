@@ -13,7 +13,7 @@ app = FastAPI(title="BGRemover API – Quita fondos al instante")
 
 # Flag para lazy load (solo en requests)
 rembg_loaded = False
-remove_session = None  # Usaremos una session para eficiencia con modelo chico
+remove_func = None
 
 # Health check (sin rembg, para que sea instantáneo)
 @app.get("/health")
@@ -25,14 +25,14 @@ async def health():
 
 @app.post("/remove-bg/")
 async def remove_background(file: UploadFile = File(...)):
-    global rembg_loaded, remove_session
+    global rembg_loaded, remove_func
     
     # Lazy load con logs y try-except
     if not rembg_loaded:
         try:
             logger.info("🔄 Cargando rembg por primera vez...")
-            from rembg import new_session
-            remove_session = new_session(model_name='u2netp')  # Modelo más chico y rápido
+            from rembg import remove  # Import directo
+            remove_func = remove
             rembg_loaded = True
             logger.info("✅ rembg cargado exitosamente con u2netp")
         except Exception as e:
@@ -48,7 +48,8 @@ async def remove_background(file: UploadFile = File(...)):
         if len(contents) == 0:
             raise HTTPException(status_code=400, detail="Archivo vacío o corrupto")
         
-        output_bytes = remove_session.remove(contents)  # Usa la session para remove rápido
+        # Usa remove directo con modelo liviano (no session)
+        output_bytes = remove_func(contents, model_name='u2netp')
         logger.info(f"✅ Procesada: {file.filename}")
         return StreamingResponse(io.BytesIO(output_bytes), media_type="image/png", 
                                  headers={"Content-Disposition": f"attachment; filename={file.filename.rsplit('.',1)[0]}_sin_fondo.png"})
@@ -59,13 +60,13 @@ async def remove_background(file: UploadFile = File(...)):
 # Batch igual, lazy
 @app.post("/remove-bg-batch/")
 async def remove_batch(files: List[UploadFile] = File(...)):
-    global rembg_loaded, remove_session
+    global rembg_loaded, remove_func
     
     if not rembg_loaded:
         try:
             logger.info("🔄 Cargando rembg para batch...")
-            from rembg import new_session
-            remove_session = new_session(model_name='u2netp')  # Modelo más chico y rápido
+            from rembg import remove
+            remove_func = remove
             rembg_loaded = True
             logger.info("✅ rembg cargado para batch con u2netp")
         except Exception as e:
@@ -81,7 +82,8 @@ async def remove_batch(files: List[UploadFile] = File(...)):
                 if len(contents) == 0:
                     logger.warning(f"Skip: {file.filename} vacío")
                     continue
-                output_bytes = remove_session.remove(contents)  # Usa la session para remove rápido
+                # Usa remove directo con modelo liviano
+                output_bytes = remove_func(contents, model_name='u2netp')
                 clean_name = f"{file.filename.rsplit('.',1)[0]}_sin_fondo.png"
                 zf.writestr(clean_name, output_bytes)
                 logger.info(f"✅ Batch: {file.filename}")
