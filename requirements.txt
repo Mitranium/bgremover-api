@@ -2,4 +2,4 @@ fastapi
 uvicorn[standard]
 rembg
 pillow
-onnxruntime-cpu  
+onnxruntime  
