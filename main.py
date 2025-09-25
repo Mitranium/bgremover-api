@@ -3,95 +3,90 @@ from fastapi.responses import StreamingResponse, JSONResponse
 import io
 from typing import List
 import zipfile
-import logging  # Para logs
+import logging  # Para logs en Render
 
-# Configura logging
+# Configura logging verbose
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="BGRemover API – Quita fondos al instante")
 
-# Flag para lazy load
+# Flag para lazy load (solo en requests)
 rembg_loaded = False
 remove_func = None
 
-# Startup event: Intenta pre-cargar rembg (no crashea si falla)
-@app.on_event("startup")
-async def startup_event():
-    global rembg_loaded, remove_func
-    try:
-        from rembg import remove
-        remove_func = remove
-        rembg_loaded = True
-        logger.info("✅ rembg cargado en startup")
-    except Exception as e:
-        logger.error(f"❌ Error cargando rembg en startup: {e}")
-        # No crashea: sigue sin él, pero endpoints fallarán graceful
-
-# Health check mejorado
+# Health check (sin rembg, para que sea instantáneo)
 @app.get("/health")
 async def health():
     global rembg_loaded
-    status = "ok" if rembg_loaded else "partial (rembg pending)"
+    status = "ok (ready to load rembg on first request)" if not rembg_loaded else "ok (rembg loaded)"
+    logger.info(f"Health check: {status}")
     return {"status": status, "rembg_loaded": rembg_loaded}
 
 @app.post("/remove-bg/")
 async def remove_background(file: UploadFile = File(...)):
     global rembg_loaded, remove_func
     
-    # Lazy load con try-except full
+    # Lazy load con logs y try-except
     if not rembg_loaded:
         try:
+            logger.info("🔄 Cargando rembg por primera vez...")
             from rembg import remove
             remove_func = remove
             rembg_loaded = True
-            logger.info("✅ rembg cargado en request")
+            logger.info("✅ rembg cargado exitosamente")
         except Exception as e:
             logger.error(f"❌ Error cargando rembg: {e}")
-            return JSONResponse(status_code=500, content={"error": f"Falló cargar el modelo: {str(e)}. Intenta de nuevo."})
+            return JSONResponse(status_code=500, content={"error": f"Falló cargar el modelo: {str(e)}. Intenta de nuevo en unos segs."})
     
     if not file.content_type.startswith('image/'):
         raise HTTPException(status_code=400, detail="Solo imágenes, porfa (PNG/JPG)")
     
     try:
+        logger.info(f"Procesando imagen: {file.filename}")
         contents = await file.read()
         if len(contents) == 0:
             raise HTTPException(status_code=400, detail="Archivo vacío o corrupto")
         
         output_bytes = remove_func(contents)
+        logger.info(f"✅ Procesada: {file.filename}")
         return StreamingResponse(io.BytesIO(output_bytes), media_type="image/png", 
                                  headers={"Content-Disposition": f"attachment; filename={file.filename.rsplit('.',1)[0]}_sin_fondo.png"})
     except Exception as e:
-        logger.error(f"❌ Error procesando imagen: {e}")
+        logger.error(f"❌ Error procesando {file.filename}: {e}")
         return JSONResponse(status_code=500, content={"error": f"Error en procesamiento: {str(e)}"})
 
-# Batch similar, con mismo handling
+# Batch igual, lazy
 @app.post("/remove-bg-batch/")
 async def remove_batch(files: List[UploadFile] = File(...)):
     global rembg_loaded, remove_func
     
     if not rembg_loaded:
         try:
+            logger.info("🔄 Cargando rembg para batch...")
             from rembg import remove
             remove_func = remove
             rembg_loaded = True
-            logger.info("✅ rembg cargado en batch request")
+            logger.info("✅ rembg cargado para batch")
         except Exception as e:
             logger.error(f"❌ Error cargando rembg: {e}")
             return JSONResponse(status_code=500, content={"error": f"Falló cargar el modelo: {str(e)}"})
     
     try:
+        logger.info(f"Procesando batch de {len(files)} archivos")
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
             for file in files:
                 contents = await file.read()
                 if len(contents) == 0:
-                    continue  # Skip vacíos
+                    logger.warning(f"Skip: {file.filename} vacío")
+                    continue
                 output_bytes = remove_func(contents)
                 clean_name = f"{file.filename.rsplit('.',1)[0]}_sin_fondo.png"
                 zf.writestr(clean_name, output_bytes)
-                logger.info(f"✅ Procesada: {file.filename}")
+                logger.info(f"✅ Batch: {file.filename}")
         zip_buffer.seek(0)
+        logger.info("✅ Batch completado")
         return StreamingResponse(zip_buffer, media_type="application/zip", 
                                  headers={"Content-Disposition": "attachment; filename=imagenes_limpias.zip"})
     except Exception as e:
